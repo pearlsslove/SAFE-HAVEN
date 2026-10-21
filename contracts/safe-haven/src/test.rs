@@ -4761,3 +4761,217 @@ fn test_emergency_withdrawal_mixed_deposit_types_same_ledger() {
     let total = vault.get_emergency_withdrawal_total(&env, env.ledger().sequence());
     assert_eq!(total, 50_000);
 }
+
+// ================================================================
+//  READONLY QUERY TESTS (TTL / Storage Path Verification)
+// ================================================================
+
+/// Verifies `get_admin()` returns the current admin address set during initialization.
+#[test]
+fn test_get_admin_returns_current_admin() {
+    let (_env, vault, _token, admin, _alice) = setup();
+    assert_eq!(vault.get_admin(), Some(admin.clone()));
+}
+
+/// Verifies `get_admin()` returns `None` after admin is renounced.
+#[test]
+fn test_get_admin_returns_none_after_renounce() {
+    let (_env, vault, _token, admin, _alice) = setup();
+    vault.renounce_admin(&admin);
+    assert_eq!(vault.get_admin(), None);
+}
+
+/// Verifies `get_pending_admin()` returns `None` before any transfer is initiated.
+#[test]
+fn test_get_pending_admin_returns_none_initially() {
+    let (_env, vault, _token, _admin, alice) = setup();
+    assert_eq!(vault.get_pending_admin(), None);
+}
+
+/// Verifies `get_pending_admin()` returns the pending admin after transfer is proposed.
+#[test]
+fn test_get_pending_admin_returns_pending_after_transfer() {
+    let (_env, vault, _token, admin, alice) = setup();
+    vault.transfer_admin(&admin, &alice);
+    assert_eq!(vault.get_pending_admin(), Some(alice.clone()));
+}
+
+/// Verifies `get_pending_admin()` returns `None` after pending admin accepts.
+#[test]
+fn test_get_pending_admin_returns_none_after_accept() {
+    let (_env, vault, _token, admin, alice) = setup();
+    vault.transfer_admin(&admin, &alice);
+    vault.accept_admin(&alice);
+    assert_eq!(vault.get_pending_admin(), None);
+}
+
+/// Verifies `get_pending_admin()` returns `None` after transfer is cancelled.
+#[test]
+fn test_get_pending_admin_returns_none_after_cancel() {
+    let (_env, vault, _token, admin, alice) = setup();
+    vault.transfer_admin(&admin, &alice);
+    vault.cancel_transfer_admin(&admin);
+    assert_eq!(vault.get_pending_admin(), None);
+}
+
+/// Verifies `get_fee_recipient()` returns the configured fee recipient.
+#[test]
+fn test_get_fee_recipient_returns_configured_recipient() {
+    let (_env, vault, _token, _admin, _alice, fee) = setup();
+    assert_eq!(vault.get_fee_recipient(), Some(fee.clone()));
+}
+
+/// Verifies `get_constants()` returns correct default limits.
+#[test]
+fn test_get_constants_returns_default_limits() {
+    let (_env, vault, _token, _admin, _alice) = setup();
+    let (max_amount, max_duration) = vault.get_constants();
+    assert_eq!(max_amount, MAX_DEPOSIT_AMOUNT);
+    assert_eq!(max_duration, MAX_LOCK_DURATION_SECS);
+}
+
+/// Verifies `get_constants()` returns custom limits when configured.
+#[test]
+fn test_get_constants_returns_custom_limits() {
+    let (_env, vault, _token, _admin, _alice) = setup_with_limits(Some(50_000), Some(7200));
+    let (max_amount, max_duration) = vault.get_constants();
+    assert_eq!(max_amount, 50_000);
+    assert_eq!(max_duration, 7200);
+}
+
+/// Verifies `get_constants()` returns default max_deposit with custom max_lock.
+#[test]
+fn test_get_constants_partial_custom_limits() {
+    let (_env, vault, _token, _admin, _alice) = setup_with_limits(None, Some(1800));
+    let (max_amount, max_duration) = vault.get_constants();
+    assert_eq!(max_amount, MAX_DEPOSIT_AMOUNT);
+    assert_eq!(max_duration, 1800);
+}
+
+/// Verifies multiple sequential calls to `get_admin()` return consistent results without state changes.
+#[test]
+fn test_multiple_get_admin_calls_are_consistent() {
+    let (_env, vault, _token, admin, _alice) = setup();
+    let first_call = vault.get_admin();
+    let second_call = vault.get_admin();
+    let third_call = vault.get_admin();
+    
+    assert_eq!(first_call, Some(admin.clone()));
+    assert_eq!(second_call, Some(admin.clone()));
+    assert_eq!(third_call, Some(admin.clone()));
+}
+
+/// Verifies multiple sequential calls to `get_pending_admin()` return consistent results.
+#[test]
+fn test_multiple_get_pending_admin_calls_are_consistent() {
+    let (_env, vault, _token, admin, alice) = setup();
+    vault.transfer_admin(&admin, &alice);
+    
+    let first_call = vault.get_pending_admin();
+    let second_call = vault.get_pending_admin();
+    let third_call = vault.get_pending_admin();
+    
+    assert_eq!(first_call, Some(alice.clone()));
+    assert_eq!(second_call, Some(alice.clone()));
+    assert_eq!(third_call, Some(alice.clone()));
+}
+
+/// Verifies multiple sequential calls to `get_fee_recipient()` return consistent results.
+#[test]
+fn test_multiple_get_fee_recipient_calls_are_consistent() {
+    let (_env, vault, _token, _admin, _alice, fee) = setup();
+    let first_call = vault.get_fee_recipient();
+    let second_call = vault.get_fee_recipient();
+    let third_call = vault.get_fee_recipient();
+    
+    assert_eq!(first_call, Some(fee.clone()));
+    assert_eq!(second_call, Some(fee.clone()));
+    assert_eq!(third_call, Some(fee.clone()));
+}
+
+/// Verifies multiple sequential calls to `get_constants()` return consistent results.
+#[test]
+fn test_multiple_get_constants_calls_are_consistent() {
+    let (_env, vault, _token, _admin, _alice) = setup_with_limits(Some(75_000), Some(10800));
+    
+    let first_call = vault.get_constants();
+    let second_call = vault.get_constants();
+    let third_call = vault.get_constants();
+    
+    assert_eq!(first_call, (75_000, 10800));
+    assert_eq!(second_call, (75_000, 10800));
+    assert_eq!(third_call, (75_000, 10800));
+}
+
+/// Verifies readonly queries don't interfere with mutating operations.
+/// Tests that after multiple readonly queries, admin transfers still work correctly.
+#[test]
+fn test_readonly_queries_dont_block_admin_transfer() {
+    let (_env, vault, _token, admin, alice) = setup();
+    
+    // Perform multiple readonly queries
+    let _ = vault.get_admin();
+    let _ = vault.get_pending_admin();
+    let _ = vault.get_constants();
+    let _ = vault.get_admin();
+    
+    // Admin transfer should still work
+    vault.transfer_admin(&admin, &alice);
+    assert_eq!(vault.get_pending_admin(), Some(alice.clone()));
+    
+    vault.accept_admin(&alice);
+    assert_eq!(vault.get_admin(), Some(alice.clone()));
+}
+
+/// Verifies that querying admin before, during, and after pending transfer remains consistent.
+#[test]
+fn test_admin_queries_across_transfer_lifecycle() {
+    let (_env, vault, _token, admin, alice) = setup();
+    
+    assert_eq!(vault.get_admin(), Some(admin.clone()));
+    assert_eq!(vault.get_pending_admin(), None);
+    
+    vault.transfer_admin(&admin, &alice);
+    assert_eq!(vault.get_admin(), Some(admin.clone()));
+    assert_eq!(vault.get_pending_admin(), Some(alice.clone()));
+    
+    vault.accept_admin(&alice);
+    assert_eq!(vault.get_admin(), Some(alice.clone()));
+    assert_eq!(vault.get_pending_admin(), None);
+}
+
+/// Verifies fee recipient remains consistent across readonly queries and operations.
+#[test]
+fn test_fee_recipient_unchanged_across_operations() {
+    let (env, vault, token, _admin, alice, fee) = setup();
+    
+    StellarAssetClient::new(&env, &token).mint(&alice, &1000);
+    
+    // Query fee recipient
+    assert_eq!(vault.get_fee_recipient(), Some(fee.clone()));
+    
+    // Make a deposit with penalty
+    let unlock_time = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1000, &unlock_time, &1000); // 10% penalty
+    
+    // Query fee recipient again
+    assert_eq!(vault.get_fee_recipient(), Some(fee.clone()));
+    
+    // Cancel with penalty
+    vault.cancel_deposit(&alice, &0);
+    
+    // Fee recipient should still be the same
+    assert_eq!(vault.get_fee_recipient(), Some(fee.clone()));
+}
+
+/// Verifies that `get_constants()` doesn't change between queries even with custom values.
+#[test]
+fn test_get_constants_persists_across_queries() {
+    let (_env, vault, _token, _admin, _alice) = setup_with_limits(Some(100_000), Some(2592000));
+    
+    for _ in 0..10 {
+        let (max_amount, max_duration) = vault.get_constants();
+        assert_eq!(max_amount, 100_000);
+        assert_eq!(max_duration, 2592000);
+    }
+}
