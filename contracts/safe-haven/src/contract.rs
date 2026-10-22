@@ -1891,8 +1891,12 @@ impl SafeHaven {
     ) -> Result<(), VaultError> {
         depositor.require_auth();
 
-        // Verify deposit exists
-        if storage::get_deposit_readonly(&env, &depositor, deposit_id).is_none() {
+        // Verify deposit exists — accept both timestamp-based and ledger-based deposits.
+        // MEV protection is independent of the unlock mechanism, so either deposit type
+        // can participate in the commit-reveal scheme (Issue #109).
+        let deposit_exists = storage::get_deposit_readonly(&env, &depositor, deposit_id).is_some()
+            || storage::get_deposit_by_ledger_readonly(&env, &depositor, deposit_id).is_some();
+        if !deposit_exists {
             return Err(VaultError::NoDepositFound);
         }
 
