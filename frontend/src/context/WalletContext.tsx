@@ -21,53 +21,75 @@ import {
   LobstrModule,
   HanaModule,
 } from '@creit.tech/stellar-wallets-kit'
-import type { WalletInfo } from '../types'
+import type { WalletInfo, SigningResult } from '../types'
 import { shortAddr } from '../lib/format'
 import { CONFIG } from '../config'
+import {
+  startSync,
+  stopSync,
+  refreshBalance as balanceSyncRefresh,
+} from '../lib/balanceSyncService'
+
+// ----------------------------------------------------------------
+//  Context shape
+// ----------------------------------------------------------------
 
 interface WalletContextValue {
+  // --- wallet connection ---
   wallet: WalletInfo | null
+  wallets: WalletInfo[]
   isConnecting: boolean
   isRestoringSession: boolean
   networkMismatch: boolean
   connect: () => Promise<void>
   disconnect: () => void
   signTransaction: (xdr: string) => Promise<SigningResult>
+
+  // --- balance sync (new) ---
+  /** Native XLM balance as a decimal string (e.g. "1234.5000000"), or null before first fetch */
+  balance: string | null
+  /** Human-readable error message when the last fetch failed; null when healthy */
+  balanceError: string | null
+  /** True when the displayed balance is from a prior successful fetch and the latest attempt failed */
+  isBalanceStale: boolean
+  /** Wall-clock Date of the most recent successful balance fetch; null before first fetch */
+  lastBalanceUpdate: Date | null
+  /** Triggers an immediate on-demand fetch */
+  refreshBalance: () => Promise<void>
+  /** True while a manual refreshBalance() call is in flight */
+  isRefreshingBalance: boolean
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null)
 
-/**
- * Initialize wallet state synchronously from localStorage
- * Returns [wallet, isRestoringSession] where isRestoringSession is true if we found
- * a saved wallet that needs async validation
- */
-function initializeWalletFromStorage(): [WalletInfo | null, boolean] {
-  // Only run on client side
-  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
-    return [null, false]
-  }
-
-  const saved = localStorage.getItem('tlv_wallet_address')
-  if (!saved) {
-    return [null, false]
-  }
-
-  // We found a saved address — restore it immediately, but mark as restoring
-  // so the UI knows it's pending async validation
-  return [{ address: saved, displayAddress: shortAddr(saved) }, true]
-}
+// ----------------------------------------------------------------
+//  Provider
+// ----------------------------------------------------------------
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
-  const [wallet, setWallet]           = useState<WalletInfo | null>(null)
-  const [isConnecting, setConnecting] = useState(false)
-  const walletKitRef = useRef<StellarWalletsKit | null>(null)
+  // --- wallet connection state ---
+  const [wallet, setWallet]                     = useState<WalletInfo | null>(null)
+  const [wallets, setWallets]                   = useState<WalletInfo[]>([])
+  const [isConnecting, setConnecting]           = useState(false)
+  const [isRestoringSession, setRestoring]      = useState(false)
+  const [networkMismatch, setNetworkMismatch]   = useState(false)
+  const walletKitRef                            = useRef<StellarWalletsKit | null>(null)
+
+  // --- balance sync state (new) ---
+  const [balance, setBalance]                           = useState<string | null>(null)
+  const [balanceError, setBalanceError]                 = useState<string | null>(null)
+  const [isBalanceStale, setIsBalanceStale]             = useState(false)
+  const [lastBalanceUpdate, setLastBalanceUpdate]       = useState<Date | null>(null)
+  const [isRefreshingBalance, setIsRefreshingBalance]   = useState(false)
 
   // Determine network
   const isMainnet = CONFIG.NETWORK_PASSPHRASE === 'Public Global Stellar Network ; September 2015'
-  const network = isMainnet ? WalletNetwork.PUBLIC : WalletNetwork.TESTNET
+  const network   = isMainnet ? WalletNetwork.PUBLIC : WalletNetwork.TESTNET
 
-  // Initialize wallet kit on mount
+  // ----------------------------------------------------------------
+  //  Initialize wallet kit on mount
+  // ----------------------------------------------------------------
+
   useEffect(() => {
     try {
       walletKitRef.current = new StellarWalletsKit({
@@ -86,46 +108,104 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     }
   }, [network])
 
-  // Restore session on mount — re-validate against the live wallet address
-  // to guard against stale sessions after an account or network switch (#12).
+  // ----------------------------------------------------------------
+  //  Restore session on mount — re-validate against the live wallet
+  //  address to guard against stale sessions after an account or
+  //  network switch.
+  // ----------------------------------------------------------------
+
   useEffect(() => {
     if (!walletKitRef.current) return
 
-    const saved = localStorage.getItem('tlv_wallet_address')
+    const saved        = localStorage.getItem('tlv_wallet_address')
+    const savedWallets = localStorage.getItem('tlv_wallets')
+
+    let restoredWallets: WalletInfo[] = []
+    try {
+      restoredWallets = savedWallets ? (JSON.parse(savedWallets) as WalletInfo[]) : []
+    } catch {
+      localStorage.removeItem('tlv_wallets')
+    }
+
+    if (saved && !restoredWallets.some((item) => item.address === saved)) {
+      restoredWallets = [{ address: saved, displayAddress: shortAddr(saved) }, ...restoredWallets]
+    }
+    setWallets(restoredWallets)
+
     if (!saved) return
+
+    setRestoring(true)
 
     const restore = async () => {
       try {
-        // Try to get the current address from the wallet kit
-        try {
-          const result = await walletKitRef.current!.getAddress()
-          if (!result || !result.address) {
-            localStorage.removeItem('tlv_wallet_address')
-            return
-          }
-
-          const { address } = result
-          if (address !== saved) {
-            // Active account changed — clear the stale session.
-            localStorage.removeItem('tlv_wallet_address')
-            toast('Wallet account changed — please reconnect.', { icon: '🔄' })
-            return
-          }
-
-          // Address is still valid; restore the session.
-          setWallet({ address: saved, displayAddress: shortAddr(saved) })
-        } catch {
-          // Not connected — clear the stale session.
+        const result = await walletKitRef.current!.getAddress()
+        if (!result?.address) {
           localStorage.removeItem('tlv_wallet_address')
+          return
         }
-      } catch (e) {
-        console.error('Session restore failed:', e)
+
+        const { address } = result
+        if (address !== saved) {
+          localStorage.removeItem('tlv_wallet_address')
+          toast('Wallet account changed — please reconnect.', { icon: '🔄' })
+          return
+        }
+
+        // Address still valid; restore the session
+        setWallet({ address: saved, displayAddress: shortAddr(saved) })
+      } catch {
+        // Not connected — clear the stale session
         localStorage.removeItem('tlv_wallet_address')
+      } finally {
+        setRestoring(false)
       }
     }
 
-    restore()
-  }, [walletKitRef])
+    void restore()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // run once on mount; walletKitRef is a ref so it's stable
+
+  // ----------------------------------------------------------------
+  //  Balance sync lifecycle — keyed on wallet address
+  // ----------------------------------------------------------------
+
+  useEffect(() => {
+    if (!wallet?.address) {
+      stopSync()
+      setBalance(null)
+      setBalanceError(null)
+      setIsBalanceStale(false)
+      setLastBalanceUpdate(null)
+      setIsRefreshingBalance(false)
+      return
+    }
+
+    const stop = startSync(wallet.address, {
+      onSuccess: (bal, ts) => {
+        setBalance(bal)
+        setLastBalanceUpdate(ts)
+        setBalanceError(null)
+        setIsBalanceStale(false)
+        setIsRefreshingBalance(false)
+      },
+      onError: (msg, count) => {
+        setBalanceError(msg)
+        setIsBalanceStale(true)
+        setIsRefreshingBalance(false)
+        if (count === 3) {
+          toast.error('Balance sync is failing — displayed balance may be stale.', {
+            id: 'balance-sync-error',
+          })
+        }
+      },
+    })
+
+    return stop
+  }, [wallet?.address])
+
+  // ----------------------------------------------------------------
+  //  Actions
+  // ----------------------------------------------------------------
 
   const connect = useCallback(async () => {
     setConnecting(true)
@@ -136,9 +216,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         return
       }
 
-      // Get the address from the wallet kit (this will prompt the user)
       const result = await walletKitRef.current.getAddress()
-      if (!result || !result.address) {
+      if (!result?.address) {
         toast.error('Could not get address from wallet')
         return
       }
@@ -146,21 +225,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const { address } = result
       const info: WalletInfo = { address, displayAddress: shortAddr(address) }
       setWallet(info)
-      setNetworkMismatch(!!hasNetworkMismatch)
       localStorage.setItem('tlv_wallet_address', address)
-      
-      if (hasNetworkMismatch) {
-        // Show a warning instead of success
-        toast.error(
-          `Network mismatch! Wallet: ${walletNetworkPassphrase}, App: ${CONFIG.NETWORK_PASSPHRASE}`,
-          { duration: 0 }
-        )
-      } else {
-        toast.success(`Connected: ${shortAddr(address)}`)
-      }
+      toast.success(`Connected: ${shortAddr(address)}`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to connect wallet'
-      // Suppress rejection/cancellation messages from user-initiated cancellations
       if (!msg.toLowerCase().includes('reject') && !msg.toLowerCase().includes('cancel')) {
         toast.error(msg, { duration: 8000 })
       }
@@ -177,9 +245,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const signTransaction = useCallback(async (txXdr: string): Promise<SigningResult> => {
-    // Check for network mismatch before attempting to sign
     if (networkMismatch) {
-      const msg = `Network mismatch: Wallet is on ${wallet?.walletNetwork}, but app is on ${CONFIG.NETWORK_PASSPHRASE}`
+      const msg = `Network mismatch: Wallet is on ${wallet?.walletNetwork ?? 'unknown'}, but app is on ${CONFIG.NETWORK_PASSPHRASE}`
       toast.error(msg, { duration: 0 })
       return { signed: false, rejected: false, error: msg }
     }
@@ -187,35 +254,69 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     try {
       if (!walletKitRef.current) {
         toast.error('Wallet not initialized')
-        return null
+        return { signed: false, rejected: false, error: 'Wallet not initialized' }
       }
 
       const result = await walletKitRef.current.signTransaction(txXdr, {
         networkPassphrase: CONFIG.NETWORK_PASSPHRASE,
       })
 
-      if (!result || !result.signedTxXdr) {
+      if (!result?.signedTxXdr) {
         toast.error('Failed to sign transaction')
-        return null
+        return { signed: false, rejected: false, error: 'No signed XDR returned' }
       }
 
-      return result.signedTxXdr
+      return { signed: true, xdr: result.signedTxXdr }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Signing rejected'
-      const isUserReject = msg.toLowerCase().includes('reject') || msg.toLowerCase().includes('cancel')
-      
-      if (!isUserReject) {
-        toast.error(`Signing error: ${msg}`)
-        return { signed: false, rejected: false, error: msg }
+      const msg           = e instanceof Error ? e.message : 'Signing rejected'
+      const isUserReject  = msg.toLowerCase().includes('reject') || msg.toLowerCase().includes('cancel')
+
+      if (isUserReject) {
+        return { signed: false, rejected: true }
       }
-      
-      // User rejection — silent, just return rejected flag
-      return { signed: false, rejected: true }
+
+      toast.error(`Signing error: ${msg}`)
+      return { signed: false, rejected: false, error: msg }
     }
   }, [networkMismatch, wallet?.walletNetwork])
 
+  const refreshBalance = useCallback(async () => {
+    if (!wallet?.address) return
+    setIsRefreshingBalance(true)
+    try {
+      await balanceSyncRefresh()
+    } catch {
+      // If refreshBalance throws (no active session), just reset the flag
+      setIsRefreshingBalance(false)
+    }
+    // isRefreshingBalance is reset inside onSuccess / onError callbacks above
+  }, [wallet?.address])
+
+  // ----------------------------------------------------------------
+  //  Render
+  // ----------------------------------------------------------------
+
   return (
-    <WalletContext.Provider value={{ wallet, isConnecting, isRestoringSession, networkMismatch, connect, disconnect, signTransaction }}>
+    <WalletContext.Provider
+      value={{
+        // wallet connection
+        wallet,
+        wallets,
+        isConnecting,
+        isRestoringSession,
+        networkMismatch,
+        connect,
+        disconnect,
+        signTransaction,
+        // balance sync
+        balance,
+        balanceError,
+        isBalanceStale,
+        lastBalanceUpdate,
+        refreshBalance,
+        isRefreshingBalance,
+      }}
+    >
       {children}
     </WalletContext.Provider>
   )

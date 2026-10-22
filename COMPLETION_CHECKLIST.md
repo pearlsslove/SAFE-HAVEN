@@ -166,9 +166,10 @@
 If issues are discovered:
 
 1. **Contract Rollback:**
-   - Deploy previous contract version
-   - Update frontend `VITE_CONTRACT_ID` to previous address
-   - Frontend automatically uses new function only if available
+  - Select a retained artifact under `deployments/<network>/<timestamp>/`.
+  - Run `SOROBAN_SECRET_KEY=S... make rollback NETWORK=<network> ARTIFACT_DIR=<artifact-dir>`.
+  - Verify the new contract ID and initialization, then update frontend `VITE_CONTRACT_ID`.
+  - Soroban contracts are immutable; rollback creates a new contract ID and does not alter the old deployment.
 
 2. **Frontend Rollback:**
    - Revert to previous frontend version

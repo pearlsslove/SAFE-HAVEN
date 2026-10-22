@@ -281,3 +281,25 @@ export function validateTokenAddress(addr: string): { valid: boolean; message: s
 
   return { valid: true, message: 'Valid contract address format' }
 }
+
+/**
+ * Format a token amount with optional USD value.
+ * Example: "1.5000000 XLM ($1.89)" or "1.5000000 XLM" if no price
+ */
+export function formatTokenWithUsd(amount: bigint, symbol: string, priceUsd?: number): string {
+  const amountStr = stroopsToXlm(amount)
+  if (priceUsd !== undefined && priceUsd > 0) {
+    const usdValue = parseFloat(amountStr) * priceUsd
+    return `${amountStr} ${symbol} ($${usdValue.toFixed(2)})`
+  }
+  return `${amountStr} ${symbol}`
+}
+
+/**
+ * Format when a price was last updated.
+ * Example: "Updated 2 minutes ago"
+ */
+export function formatPriceUpdate(timestamp: number): string {
+  const date = fromUnixTime(timestamp)
+  return `Updated ${formatDistanceToNow(date, { addSuffix: true })}`
+}

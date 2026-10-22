@@ -75,6 +75,14 @@ make dev
 # Deploy to testnet
 export SOROBAN_SECRET_KEY=S...
 make deploy-testnet
+
+# Deploy to mainnet (the deployer must already be funded; no mainnet faucet exists)
+export SOROBAN_SECRET_KEY=S...
+make deploy-mainnet
+
+# Redeploy a retained immutable WASM as a new contract ID
+export SOROBAN_SECRET_KEY=S...
+make rollback NETWORK=testnet ARTIFACT_DIR=deployments/testnet/<timestamp>
 ```
 
 ### Frontend
@@ -87,6 +95,20 @@ npm run dev            # -> http://localhost:5173
 ```
 
 See [`frontend/README.md`](./frontend/README.md) for the full frontend guide.
+
+See [`DISASTER_RECOVERY.md`](./DISASTER_RECOVERY.md) for disaster scenarios, recovery procedures, roles, and escalation rules.
+
+See [`MONITORING.md`](./MONITORING.md) for contract health checks, alert thresholds, storage/TTL monitoring, and failed-transaction observability.
+
+See [`LEGAL.md`](./LEGAL.md) for Terms of Service, Privacy Policy, disclaimers, GDPR compliance, data retention policy, and the on-chain audit trail reference.
+
+See [`SUPPORT.md`](./SUPPORT.md) for the version lifecycle, maintenance and support matrix, bug-fix SLAs by severity, and EOL policy.
+
+See [`BRANCHING.md`](./BRANCHING.md) for the branching strategy, naming conventions, branch protection rules, release checklist, hotfix procedure, and rollback procedures.
+
+See [`POSTMORTEM.md`](./POSTMORTEM.md) for the incident post-mortem process, blameless culture guidelines, post-mortem template, action item tracking, and quarterly review process.
+
+Deployment artifacts are written to `deployments/<network>/<timestamp>/`, including raw and optimized WASM, contract ID, manifest, and checksum. Each deployment also updates `deploy_<network>.log` for CI compatibility. Soroban contracts are immutable, so rollback means deploying the retained previous WASM as a new contract and updating the frontend contract ID after verification.
 
 ---
 
@@ -117,6 +139,70 @@ See [`frontend/README.md`](./frontend/README.md) for the full frontend guide.
 
 ---
 
+## MEV Protection
+
+SAFE-HAVEN includes built-in **MEV (Maximal Extractable Value) protection** to prevent sandwich attacks and front-running. The system uses a **commit-reveal scheme** combined with **time-weighted average pricing (TWAP)** to detect and mitigate MEV extraction.
+
+### Key Features
+
+- **Commit-Reveal Scheme** — Depositors privately commit transaction details (via hash), then reveal after the commit is immutable. Prevents attackers from predicting and front-running orders.
+- **Price Monitoring** — Continuous tracking of token prices; stores up to 24 hours of hourly price samples.
+- **Sandwich Attack Detection** — Compares current price against TWAP. Deviations exceeding 200 basis points (2%) trigger attack detection.
+- **MEV Recovery & Redistribution** — Recovered value is credited to affected users' MEV pools, which they can claim individually.
+- **Transparent Event Logging** — All MEV detections, commits, and recoveries are emitted as on-chain events for audit and monitoring.
+
+### MEV Protection API
+
+| Function | Purpose |
+|---|---|
+| `mev_commit(depositor, deposit_id, commit_hash)` | Submit a private commit to enable MEV protection |
+| `mev_reveal(depositor, deposit_id, token, amount, price, nonce)` | Reveal the commit and trigger MEV detection |
+| `claim_mev_recovery(depositor)` | Claim recovered MEV from the pool |
+| `get_mev_status_query(depositor, deposit_id)` | Query MEV protection status (`Unprotected`, `Committed`, `Revealed`, `AttackDetected`) |
+| `get_mev_detections(depositor, deposit_id, offset, limit)` | Paginated view of detected attacks |
+| `get_mev_pool_total()` | Query total MEV pool (pending distribution) |
+| `finalize_mev_redistribution(admin)` | Admin function to finalize MEV redistribution |
+
+### Example: MEV Protection Workflow
+
+```
+1. Alice deposits 1000 USDC with 1% penalty, locked for 1000 seconds
+   → deposit_id = 0
+
+2. Alice submits MEV commit (private order details via hash):
+   commit_hash = Keccak256(usdc_addr || 1000 || 102 || nonce)
+   mev_commit(alice, 0, commit_hash)
+   → Status: Committed
+
+3. Within 30 minutes, Alice reveals her actual transaction:
+   mev_reveal(alice, 0, usdc_addr, 1000, 102, nonce)
+   → Contract verifies hash matches
+   → Status: Revealed
+   → Price sample recorded
+
+4. Contract detects sandwich attack via TWAP:
+   If current_price (102) deviates from TWAP (100) by > 200 bps
+   → MEV attack detected!
+   → 2 USDC recovered and added to MEV pool
+   → Event: mev_detected(alice, 0, 200, 2)
+
+5. Alice claims her recovery:
+   mev_recovered = claim_mev_recovery(alice)
+   → Returns: 2 USDC
+   → Tokens transferred to alice
+```
+
+### Configuration
+
+| Constant | Value | Description |
+|---|---|---|
+| `MEV_REVEAL_WINDOW_SECS` | 1,800 (30 min) | Time allowed to reveal after commit |
+| `MEV_PRICE_DEVIATION_THRESHOLD_BPS` | 200 (2%) | Deviation threshold to trigger detection |
+
+For more details, see **[MEV_PROTECTION.md](./MEV_PROTECTION.md)**.
+
+---
+
 ## Contract API
 
 ### Initialization
@@ -133,6 +219,11 @@ Locks tokens. Returns the deposit ID.
 
 #### `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps) -> u32`
 Payer funds a vault for a different beneficiary.
+
+#### Smart wallets and delegated deposits
+Smart wallets use their contract address as `depositor`; the vault relies on Soroban `require_auth()` and does not require an EOA. Multisig and account-abstraction wallets keep their own approval policy and authorize the vault and token calls.
+
+For time-bounded delegated funding, use `authorize_session_key`, `deposit_with_session_key`, and `revoke_session_key`. The session key is the payer, while the smart wallet remains the deposit owner. See [Smart Wallet Integration](docs/SMART_WALLETS.md) for the security model and integration checklist.
 
 #### `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps) -> u32`
 Locks tokens until a specific Stellar ledger sequence number is reached, instead of a wall-clock timestamp.
@@ -176,6 +267,12 @@ Withdraws if `now >= unlock_time`.
 #### `withdraw_to(depositor, deposit_id, recipient)`
 Withdraws to a different address.
 
+**Recipient Validation**
+- The recipient address must be valid and non-zero. Soroban's Address type ensures addresses are properly formed at the SDK level.
+- Validation occurs before any state mutations (storage writes or token transfers), ensuring the transaction fails early with a clear error message if the recipient is invalid.
+- If recipient validation fails, the deposit remains in storage with no state changes.
+- Returns `InvalidRecipient` error (code 28) if the recipient address is invalid.
+
 #### `cancel_deposit(depositor, deposit_id)`
 Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumulates in the staker rewards pool; remainder returned to depositor.
 
@@ -183,7 +280,7 @@ Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumu
 
 ### Staker Registry Functions
 
-The staker registry allows users to register as stakers and earn a portion of penalties accrued from early deposit exits. This creates an incentive mechanism where stakers share in the penalties paid by users who exit early.
+The staker registry records a numeric weight and maintains penalty/reward-pool accounting. **The current implementation does not transfer tokens on registration or on reward claims, and the pool is not separated by token.** Read the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for the step-by-step registration and claim walkthroughs, exact calculation rules, CLI and TypeScript examples, and FAQ.
 
 #### `register_staker(staker, amount) -> Result<(), VaultError>`
 Register or update a staker's stake amount.
@@ -193,7 +290,7 @@ Register or update a staker's stake amount.
 | Parameter | Type | Description |
 |---|---|---|
 | `staker` | `Address` | The staker's address. Must sign the transaction. |
-| `amount` | `i128` | Stake amount in contract tokens (> 0). |
+| `amount` | `i128` | Positive numeric weight used in reward calculations; no tokens are transferred. |
 
 **Returns** `Ok(())` on success, or an error code if validation fails.
 
@@ -214,6 +311,26 @@ vault.register_staker(&alice, &1000)?;
 vault.register_staker(&alice, &2000)?;
 ```
 
+#### `get_stakers(offset, limit) -> Page`
+Return a page of staker addresses in registration order. The result includes `total_count`, which is the number of registered stakers across all pages. Registration uses indexed persistent storage so adding stakers does not rewrite the full list.
+
+```rust
+let page = vault.get_stakers(&0, &25);
+// page.items contains the first 25 addresses; page.total_count reports all stakers.
+```
+
+#### `get_staker_info(staker) -> Option<StakerInfo>`
+Read a staker's stake amount, rewards, and registration timestamp without modifying contract state. Returns `None` when the address is not registered.
+
+`StakerInfo` contains `stake_amount`, `rewards_earned`, `rewards_claimed`, and `registration_timestamp`. `rewards_earned` is cumulative claimed rewards plus the staker's current proportional share of the unclaimed rewards pool; the unclaimed portion is an estimate and can change as the pool or total stake changes. Legacy registrations without a stored timestamp return `0`.
+
+```rust
+if let Some(info) = vault.get_staker_info(&alice) {
+    // info.stake_amount, info.rewards_earned, info.rewards_claimed
+    // info.registration_timestamp
+}
+```
+
 #### `claim_staker_rewards(staker) -> Result<(), VaultError>`
 Claim accumulated rewards from the staker rewards pool.
 
@@ -227,11 +344,11 @@ Claim accumulated rewards from the staker rewards pool.
 
 **Behavior**
 - Validates that the staker is registered — returns `StakerNotFound` if not.
-- Calculates the staker's proportional share: `(stake_amount / total_staked) × rewards_pool`.
+- Calculates `floor(stake_amount × current_rewards_pool / total_staked)` using the pool at claim time.
 - Validates that the calculated reward is > 0 — returns `NoRewardsToClaim` if the pool is empty or the proportion rounds to zero.
 - Deducts the reward from the rewards pool.
 - Tracks cumulative rewards claimed per staker for auditing.
-- Emits a `RewardsClaimed` event.
+- Emits a `RewardsClaimed` event. The current implementation does not transfer tokens.
 - Requires authentication from the staker.
 
 **Example**
@@ -239,15 +356,17 @@ Claim accumulated rewards from the staker rewards pool.
 // Alice claims her proportional share of the rewards pool
 vault.claim_staker_rewards(&alice)?;
 
-// If Alice has stake 1000 and total_staked is 4000, and rewards_pool is 700:
-// Alice's reward = (1000 / 4000) × 700 = 175 tokens
+// If Alice has weight 1000, total_staked is 4000, and the pool is 700:
+// The claim accounting amount is floor(1000 × 700 / 4000) = 175.
 ```
+
+For limitations, claim-order effects, and the full penalty behavior, see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md).
 
 ---
 
 ### Penalty Splitting & Rewards Pool
 
-When a user calls `cancel_deposit()` to exit early, the penalty is split as follows:
+For timestamp-based and ledger-based single-token deposits, an early `cancel_deposit()` splits the penalty as follows:
 
 | Recipient | Percentage | Basis Points |
 |---|---|---|
@@ -260,6 +379,7 @@ If a user cancels a deposit with 100 tokens penalty (10% of 1000):
 - Staker Rewards Pool receives 70 tokens (100 × 0.70)
 
 Registered stakers can then claim their proportional share of the rewards pool based on their stake amount relative to total staked.
+Multi-token early cancellation currently sends the full penalty to the fee recipient. Claims update accounting and emit an event but do not transfer tokens; see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for details.
 
 ---
 
@@ -302,6 +422,102 @@ Permanently removes admin. Contract becomes fully trustless.
 
 ---
 
+## Sustainability Metrics
+
+SAFE-HAVEN tracks environmental impact across all deposits to support ESG goals and climate commitments.
+
+### Carbon Footprint Tracking
+
+Each deposit automatically calculates a **carbon footprint** based on:
+- **Amount locked** — larger deposits = higher impact
+- **Lock duration** — longer locks = higher impact
+- **Baseline multiplier** — configurable environmental cost per unit-second (default: 1 gram CO2e per unit per second)
+
+**Formula**: `carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`
+
+### Renewable Energy Percentage
+
+Every deposit tracks an assumed **renewable energy percentage** (default: 50%). This represents the energy mix used for hosting and network operations.
+
+### Carbon Offset Integration
+
+Users can configure a **penalty basis points** (0–10,000) that simultaneously:
+1. **Penalizes early withdrawals** — funds are sent to the fee recipient
+2. **Offsets carbon** — penalty % is converted to CO2 offset
+
+**Formula**: `carbon_offset = carbon_footprint × (penalty_bps / 10,000)`
+
+### Sustainability Metrics Queries
+
+#### `get_sustainability_metrics(depositor, deposit_id) -> Option<SustainabilityMetrics>`
+Retrieves calculated metrics for a single deposit:
+```rust
+pub struct SustainabilityMetrics {
+    pub deposit_id: u32,
+    pub depositor: Address,
+    pub carbon_footprint: i128,           // grams CO2e
+    pub renewable_energy_percent: u32,   // 0-100%
+    pub carbon_offset_grams: i128,       // grams CO2 offset
+    pub timestamp: u64,                  // when recorded
+}
+```
+
+#### `generate_sustainability_report(depositor) -> SustainabilityReport`
+Aggregates metrics across all active deposits:
+```rust
+pub struct SustainabilityReport {
+    pub depositor: Address,
+    pub total_carbon_footprint: i128,        // sum across all deposits
+    pub average_renewable_energy_percent: u32, // weighted average
+    pub total_carbon_offset: i128,           // sum of all offsets
+    pub active_deposit_count: u32,           // number of open vaults
+    pub report_timestamp: u64,
+}
+```
+
+### Sustainability Milestones
+
+The contract emits `SustainabilityMilestone` events when depositors achieve environmental goals:
+
+| Milestone | Condition |
+|---|---|
+| **Carbon Neutral** | 100% of carbon footprint is offset |
+| **High Renewable** | ≥ 75% renewable energy across deposits |
+| **Carbon Negative** | Total offset exceeds total footprint |
+| **Large Offset** | Total offset ≥ 1 billion grams CO2e (1,000 tonnes) |
+
+**Behavior**: Each milestone is emitted at most once per depositor (using a bitmap flag). Once achieved, the same milestone will not emit again unless reset.
+
+### Lifecycle of Metrics
+
+| Event | Action |
+|---|---|
+| **Deposit** | Metrics calculated, stored, aggregates updated, milestones checked |
+| **Withdraw** | Metrics removed from storage (no longer needed) |
+| **Cancel** | Metrics removed, aggregates decremented |
+| **Query** | `get_sustainability_metrics()` and `generate_sustainability_report()` read-only (no writes) |
+
+### Example: Tracking a Sustainable Vault
+
+```
+1. Alice deposits 1,000 USDC for 100 days with 50% early-exit penalty
+   → carbon_footprint = 1,000 × 8,640,000 seconds × 1 = 8.64 billion grams CO2e
+   → carbon_offset = 8.64 billion × 0.5 = 4.32 billion grams (50% offset)
+
+2. She makes a second deposit of 500 USDC for 50 days with 100% penalty
+   → carbon_footprint = 500 × 4,320,000 × 1 = 2.16 billion grams
+   → carbon_offset = 2.16 billion (full offset)
+
+3. Her sustainability report shows:
+   → total_carbon_footprint = 10.8 billion grams
+   → total_carbon_offset = 6.48 billion grams
+   → average_renewable_energy = 50%
+   → SustainabilityMilestone::HighRenewable is NOT emitted (50% < 75% threshold)
+   → SustainabilityMilestone::LargeOffset IS emitted (6.48B > 1B threshold)
+```
+
+---
+
 ## Error Codes
 
 | Code | Name | Meaning |
@@ -325,6 +541,7 @@ Permanently removes admin. Contract becomes fully trustless.
 | 17 | `StakerNotFound` | Staker not registered in the staker registry |
 | 18 | `NoRewardsToClaim` | Rewards pool is empty or staker's share rounds to zero |
 | 19 | `InsufficientStakeAmount` | Insufficient staked amount for operation |
+| 28 | `InvalidRecipient` | Recipient address is invalid or zero address in `withdraw_to()` |
 
 ---
 
@@ -468,7 +685,6 @@ The following gaps apply specifically to `deposit_by_ledger` deposits. All other
 | Limitation | Detail |
 |---|---|
 | **No frontend support** | The React UI only exposes `deposit` and `deposit_for`. Ledger-based deposits must be made via the Stellar CLI or a custom SDK integration. |
-| **No maximum lock duration** | `deposit` and `deposit_for` reject lock durations longer than `max_lock_secs` (default 5 years). `deposit_by_ledger` only enforces a *minimum* gap of 12 ledgers (`MIN_LOCK_LEDGERS`). There is no equivalent upper-bound check on `unlock_ledger`, so arbitrarily far-future ledger numbers are accepted. |
 | **`get_vault` returns `None`** | The `get_vault(depositor, id)` query only searches timestamp-based entries. To retrieve a ledger-based deposit, use `get_ledger_vault(depositor, id)` which returns `Option<LedgerVaultEntry>`. |
 | **`time_remaining` is an estimate** | For ledger-based deposits, `time_remaining` returns `remaining_ledgers × 5` seconds. This is an approximation because actual ledger close times vary by ±1-2 seconds and are not exactly 5 seconds. **Do not rely on this value for precise scheduling or critical timing.** Use this estimate for UI display and rough scheduling only. The actual withdrawal check (`current_ledger >= unlock_ledger`) is exact and will work correctly. |
 | **`get_deposits_page` excludes ledger-based deposits** | The paginated flat deposits view only iterates over timestamp-based `VaultEntry` records. To enumerate ledger-based deposits, use `get_depositors` + `get_deposit_ids` + `get_ledger_vault`. |
@@ -496,12 +712,412 @@ make deny             # cargo deny (licenses)
 
 ---
 
+## Prediction Markets
+
+SAFE-HAVEN includes a decentralized prediction market system that allows users to create, bet on, and resolve outcome-based markets tied to deposit behavior. Markets provide price discovery, hedging opportunities, and incentive alignment while remaining resistant to manipulation.
+
+### Market Types
+
+Markets can predict various SAFE-HAVEN deposit outcomes:
+
+| Market Type | Description | Example |
+|---|---|---|
+| `aggregate_deposits` | Total value of active deposits | "Sum of all deposits > 1M tokens" |
+| `avg_lock_time` | Average deposit lock duration | "Average lock time > 90 days" |
+| `unique_depositors` | Number of distinct depositors | "Active depositors > 500" |
+| `deposit_distribution` | Distribution across lock periods | "50% locked > 180 days" |
+| `penalty_accrual` | Total penalties collected | "Penalties > 50K tokens" |
+
+### Market Architecture
+
+**Two-phase resolution**:
+1. **Betting Phase** — Users place bets until `close_time`
+2. **Resolution Phase** — Oracle submits outcome between `close_time` and `resolution_deadline`
+
+**Anti-manipulation mechanisms**:
+- **Authorized oracles** — Only designated oracle can resolve each market
+- **Resolution deadline** — Forces resolution within a fixed window
+- **Duplicate submission prevention** — Oracle can submit once per market
+- **Outcome validation** — Invalid outcomes rejected at submission time
+- **Market closure required** — Resolution only possible on closed markets
+
+### Market API
+
+#### Initialization
+
+##### `init_prediction_markets(admin, fee_recipient, default_fee_bps?)`
+
+Initialize the prediction market subsystem.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Admin address (can create markets, cancel) |
+| `fee_recipient` | `Address` | Receives fees from claimed winnings |
+| `default_fee_bps` | `Option<u32>` | Default fee in basis points (0-1000, default: 100 = 1%) |
+
+**Returns** `Ok(())` on success.
+
+---
+
+#### Market Creation
+
+##### `create_prediction_market(creator, market_type, description, oracle, close_time, resolution_deadline, outcome_names, fee_bps?)`
+
+Create a new prediction market.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `creator` | `Address` | Must sign the transaction |
+| `market_type` | `String` | Market category (e.g., "aggregate_deposits") |
+| `description` | `String` | Human-readable description |
+| `oracle` | `Address` | Oracle address that will resolve the market |
+| `close_time` | `u64` | Unix timestamp when betting closes |
+| `resolution_deadline` | `u64` | Deadline for oracle to submit resolution |
+| `outcome_names` | `Vec<String>` | Names of 2-4 possible outcomes |
+| `fee_bps` | `Option<u32>` | Basis points fee (0-1000, optional) |
+
+**Returns** `u32` — the new market_id.
+
+**Constraints**:
+- `close_time > now` and `close_time - now >= MIN_MARKET_DURATION_SECS` (1 hour)
+- `resolution_deadline > close_time` and `resolution_deadline - close_time >= min_resolution_time_secs`
+- `outcome_names.len()` must be 2-4
+- `fee_bps` must be ≤ MAX_FEE_BPS (1000)
+
+**Example**:
+```rust
+// Market: "Will aggregate deposits exceed 1M tokens in the next 30 days?"
+let market_id = contract.create_prediction_market(
+    creator: alice,
+    market_type: "aggregate_deposits",
+    description: "Total deposits > 1M USDC?",
+    oracle: oracle_address,
+    close_time: now + 30_days,
+    resolution_deadline: now + 30_days + 1_hour,
+    outcome_names: vec!["Yes (>1M)", "No (<=1M)"],
+    fee_bps: Some(100),  // 1% fee
+)?;
+```
+
+---
+
+#### Betting
+
+##### `place_prediction_bet(bettor, market_id, outcome_id, amount, token)`
+
+Place a bet on a market outcome.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `bettor` | `Address` | Must sign the transaction |
+| `market_id` | `u32` | Target market |
+| `outcome_id` | `u32` | Outcome to bet on (0-3) |
+| `amount` | `i128` | Wager amount (1 - 10^15 units) |
+| `token` | `Address` | Token contract address for payment |
+
+**Returns** `Ok(())` on success.
+
+**Constraints**:
+- Market must be `Open` and `now < close_time`
+- `outcome_id < outcome_count`
+- `amount` must be 1 - 10^15
+- Bettor cannot place two bets on the same outcome in the same market
+- Bettor must approve token transfer
+
+**Example**:
+```rust
+// Bet 100 USDC on "Yes (>1M)" outcome
+contract.place_prediction_bet(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,  // "Yes (>1M)"
+    amount: 100 * 10^6,  // 100 USDC
+    token: usdc_address,
+)?;
+```
+
+---
+
+#### Market Management
+
+##### `close_prediction_market(closer, market_id)`
+
+Close market to new bets. Only admin or oracle can call.
+
+**Returns** `Ok(())` on success.
+
+---
+
+##### `resolve_prediction_market(oracle, market_id, winning_outcome, resolution_data?)`
+
+Submit resolution for a closed market.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `oracle` | `Address` | Must be the market's designated oracle |
+| `market_id` | `u32` | Market to resolve |
+| `winning_outcome` | `u32` | Winning outcome ID (0-3) |
+| `resolution_data` | `Option<i128>` | Optional: aggregate value (e.g., total deposits) |
+
+**Returns** `Ok(())` on success.
+
+**Constraints**:
+- `now <= resolution_deadline`
+- Market must be `Closed`
+- `winning_outcome < outcome_count`
+- Oracle cannot submit twice
+
+**Example**:
+```rust
+// Resolve market: outcome 0 ("Yes") won, final aggregate = 1.2M
+contract.resolve_prediction_market(
+    oracle: oracle_address,
+    market_id: 1,
+    winning_outcome: 0,
+    resolution_data: Some(1_200_000 * 10^6),  // 1.2M USDC
+)?;
+```
+
+---
+
+#### Claiming Winnings
+
+##### `claim_prediction_winnings(bettor, market_id, outcome_id, token)`
+
+Claim winnings for a resolved market.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `bettor` | `Address` | Must sign the transaction |
+| `market_id` | `u32` | Resolved market |
+| `outcome_id` | `u32` | Outcome bettor wagered on |
+| `token` | `Address` | Token to receive payout in |
+
+**Returns** `i128` — payout amount (after fees).
+
+**Constraints**:
+- Market must be `Resolved`
+- `outcome_id` must be the market's `winning_outcome`
+- Bettor cannot claim twice
+
+**Winnings calculation**:
+```
+winnings = (bet_amount / total_winning_bets) × total_pool
+fee = winnings × (fee_bps / 10_000)
+payout = winnings - fee
+```
+
+**Example**:
+```rust
+// Alice bet 100 on outcome 0. Outcome 0 won.
+// Total winning bets: 500. Total pool: 2000.
+// Alice's winnings = (100 / 500) × 2000 = 400
+// With 1% fee: payout = 400 - 4 = 396
+let payout = contract.claim_prediction_winnings(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,
+    token: usdc_address,
+)?;
+// payout = 396 USDC (minus fees sent to fee_recipient)
+```
+
+---
+
+#### Market Operations
+
+##### `cancel_prediction_market(admin, market_id, token)`
+
+Cancel a market and refund all bets. Admin only.
+
+**Returns** `i128` — total refunded.
+
+---
+
+##### `set_prediction_market_paused(admin, paused)`
+
+Pause/unpause market creation.
+
+---
+
+### Read-Only Queries
+
+| Function | Returns | Description |
+|---|---|---|
+| `get_prediction_market(market_id)` | `Option<PredictionMarket>` | Market details and status |
+| `get_market_outcome(market_id, outcome_id)` | `Option<MarketOutcome>` | Total bets and bettor count on outcome |
+| `get_user_bet(market_id, outcome_id, bettor)` | `Option<Bet>` | User's bet details |
+
+---
+
+### Data Structures
+
+#### `PredictionMarket`
+
+```rust
+pub struct PredictionMarket {
+    pub market_id: u32,
+    pub market_type: String,
+    pub description: String,
+    pub oracle: Address,
+    pub close_time: u64,
+    pub resolution_deadline: u64,
+    pub status: MarketStatus,  // Open, Closed, Resolved, Cancelled
+    pub winning_outcome: Option<u32>,
+    pub total_pool: i128,
+    pub bettor_count: u32,
+    pub outcome_count: u32,
+    pub created_at: u64,
+    pub resolution_data: Option<i128>,
+    pub fee_bps: u32,
+}
+```
+
+#### `MarketOutcome`
+
+```rust
+pub struct MarketOutcome {
+    pub outcome_id: u32,
+    pub name: String,
+    pub total_bet_amount: i128,
+    pub bettor_count: u32,
+}
+```
+
+#### `Bet`
+
+```rust
+pub struct Bet {
+    pub bettor: Address,
+    pub market_id: u32,
+    pub outcome_id: u32,
+    pub amount: i128,
+    pub timestamp: u64,
+    pub claimed: bool,
+}
+```
+
+---
+
+### Security Properties
+
+| Property | Implementation |
+|---|---|
+| **Auth enforcement** | All state-mutating functions require caller authentication |
+| **Oracle integrity** | Only designated oracle can resolve each market |
+| **Manipulation resistance** | Resolution deadline, duplicate submission checks, outcome validation |
+| **Fair distribution** | Proportional payout: `(bet / winning_pool) × total_pool` |
+| **Fee accountability** | Fees tracked per claim, sent to designated fee_recipient |
+| **No re-entrancy** | Storage state updated before token transfers |
+| **Overflow safety** | All arithmetic uses saturating operations |
+
+---
+
+### Error Codes
+
+| Code | Name | Meaning |
+|---|---|---|
+| 1000 | `MarketNotFound` | Market ID does not exist |
+| 1001 | `MarketNotOpen` | Market status is not Open |
+| 1002 | `InvalidMarketStatus` | Invalid status for operation |
+| 1003 | `InvalidOutcomeCount` | Outcome count not in 2-4 range |
+| 1004 | `InvalidResolutionTime` | Resolution timing invalid |
+| 1005 | `ResolutionTimeInPast` | Deadline in the past |
+| 1006 | `InvalidFeeBps` | Fee basis points > 1000 |
+| 1007 | `BettingClosed` | Market closed to new bets |
+| 1008 | `InvalidBetAmount` | Bet amount out of range |
+| 1009 | `InvalidOutcomeId` | Outcome ID invalid for market |
+| 1010 | `BetNotFound` | User has no bet on outcome |
+| 1011 | `AlreadyBetOnOutcome` | User already bet on this outcome |
+| 1012 | `InsufficientFunds` | Not enough tokens for bet |
+| 1013 | `MarketNotClosedYet` | Market still accepting bets |
+| 1014 | `MarketAlreadyResolved` | Market already resolved |
+| 1015 | `InvalidWinningOutcome` | Outcome ID invalid for winning |
+| 1016 | `ResolutionDeadlineExceeded` | Past deadline for resolution |
+| 1017 | `UnauthorizedOracle` | Not the designated oracle |
+| 1018 | `OracleSubmissionExists` | Oracle already submitted |
+| 1019 | `NoWinningBets` | Bettor did not win |
+| 1020 | `BetsAlreadyClaimed` | Already claimed winnings |
+| 1021 | `InvalidClaimAmount` | Calculated payout invalid |
+| 1022 | `ClaimingBeforeResolution` | Market not yet resolved |
+| 1023 | `Unauthorized` | Caller not authorized |
+| 1024 | `InvalidAdmin` | Invalid admin address |
+| 1025 | `MarketPaused` | Market creation paused |
+
+---
+
+### Example: Full Market Lifecycle
+
+```rust
+// 1. INITIALIZE (contract deployment)
+contract.init_prediction_markets(
+    admin: admin_address,
+    fee_recipient: treasury_address,
+    default_fee_bps: Some(100),  // 1%
+)?;
+
+// 2. CREATE MARKET
+let market_id = contract.create_prediction_market(
+    creator: alice,
+    market_type: "aggregate_deposits",
+    description: "Will deposits exceed 1M USDC?",
+    oracle: oracle_address,
+    close_time: now + 30.days(),
+    resolution_deadline: now + 31.days(),
+    outcome_names: vec!["Yes (>1M)", "No (<=1M)"],
+    fee_bps: None,  // Use default 1%
+)?;
+
+// 3. PLACE BETS (until close_time)
+contract.place_prediction_bet(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,  // "Yes"
+    amount: 100 * 10^6,
+    token: usdc_address,
+)?;
+
+contract.place_prediction_bet(
+    bettor: bob,
+    market_id: 1,
+    outcome_id: 1,  // "No"
+    amount: 50 * 10^6,
+    token: usdc_address,
+)?;
+
+// 4. CLOSE MARKET (by oracle or admin)
+contract.close_prediction_market(closer: oracle_address, market_id: 1)?;
+
+// 5. RESOLVE MARKET (by oracle before deadline)
+contract.resolve_prediction_market(
+    oracle: oracle_address,
+    market_id: 1,
+    winning_outcome: 0,  // "Yes" won
+    resolution_data: Some(1_200_000 * 10^6),
+)?;
+
+// 6. CLAIM WINNINGS (by winners)
+let payout = contract.claim_prediction_winnings(
+    bettor: alice,
+    market_id: 1,
+    outcome_id: 0,
+    token: usdc_address,
+)?;
+// Alice receives: (100 / 100) × 150 × 0.99 = 148.5 USDC
+// Treasury receives: 1.5 USDC (1% fee)
+```
+
+---
+
 ## Use Cases
 
 - **Savings** - Lock funds for a fixed period to enforce discipline
 - **Token vesting** - Team/investor tokens released on a schedule
 - **HODL commitments** - Commit to not selling until a future date
 - **Escrow** - Time-gated release of payment
+- **Price discovery** — Prediction markets reveal community expectations about deposit behavior
+- **Hedging** — Users offset risk by betting against favorable outcomes
+- **Engagement** — Markets incentivize participation and align stakeholder interests
 
 ---
 
@@ -512,3 +1128,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [CHANGELOG.md](./CHANGELOG.md).
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-899 -->
+- #899: Issue #8: Withdraw - Recipient Address Validation
+
+<!-- handsoff-issue-901 -->
+- #901: Issue #10: Deposit Retrieval - get_vault Query Consistency
+
+<!-- handsoff-issue-902 -->
+- #902: Issue #11: Withdrawal Fee Calculation Accuracy

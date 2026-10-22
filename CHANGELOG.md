@@ -7,6 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## How to Use This File
+
+### For contributors
+
+Every non-trivial PR **must** add an entry under `[Unreleased]` before it can be merged.
+Add your entry to the appropriate sub-section. Use the imperative mood and link the issue
+number in parentheses at the end (e.g. `(#42)`).
+
+When in doubt, add an entry. It is easier to remove a line than to reconstruct history.
+
+### For maintainers releasing a new version
+
+1. Decide the next version number following the [Versioning Guide](#versioning-guide) below.
+2. Replace `[Unreleased]` with `[X.Y.Z] - YYYY-MM-DD` (today's date in UTC).
+3. Add a fresh empty `[Unreleased]` section at the top.
+4. Update the comparison links at the bottom of this file.
+5. Tag the commit: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`.
+
+### What belongs in each section
+
+| Section | When to use |
+|---|---|
+| `### Breaking Changes` | Any change that requires callers to update their code, deployment scripts, or integration |
+| `### Added` | New public functions, new events, new storage keys, new CLI targets, new CI jobs |
+| `### Changed` | Behaviour changes to existing functions that are backward-compatible |
+| `### Deprecated` | Things that still work but will be removed in the next major version |
+| `### Removed` | Things that no longer exist |
+| `### Fixed` | Bug fixes — one line per issue, link the GitHub issue |
+| `### Security` | Vulnerabilities fixed — these get a dedicated entry regardless of scope |
+
+**Breaking Changes** is the most important section. If you add anything there, the major version must be bumped (see Versioning Guide).
+
+---
+
+## Versioning Guide
+
+SAFE-HAVEN uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html): **MAJOR.MINOR.PATCH**
+
+### When to bump each component
+
+| Component | Bump when… | Examples |
+|---|---|---|
+| **MAJOR** | Any breaking change to the on-chain contract ABI, storage layout, or behaviour that requires existing integrations to change | Renaming a function, changing a parameter type, removing a function, changing error codes, altering the `VaultEntry` struct layout |
+| **MINOR** | New backward-compatible functionality | New contract function, new event, new query, new Makefile target, new CI job |
+| **PATCH** | Bug fixes and security patches that do not change the public API | Fix incorrect error code, fix TTL bump regression, fix frontend display bug |
+
+### Pre-release and build metadata
+
+- Pre-release versions: `1.0.0-alpha.1`, `1.0.0-rc.1`
+- Testnet-only releases are tagged as pre-release until mainnet deployment is confirmed.
+- The version in `contracts/safe-haven/Cargo.toml` must match the git tag.
+
+### Smart contract versioning note
+
+Because deployed Soroban contracts are **immutable**, a MAJOR version bump implies a new
+contract deployment. Existing depositors on the old contract are unaffected and must migrate
+voluntarily. Migration paths must be documented in the release notes.
+
+---
+
+## Release Notes Template
+
+When cutting a new release, copy this template and fill it in above the previous release entry.
+Delete sections that have no content for this release.
+
+```markdown
+## [X.Y.Z] - YYYY-MM-DD
+
+> One-sentence summary of what this release is about.
+
+### ⚠️ Breaking Changes
+
+<!--
+  List every change that requires callers / operators to update their code or deployment.
+  Be specific: what changed, what the old behaviour was, and what the new behaviour is.
+  Link a migration guide if the change is complex.
+-->
+
+- **`function_name` parameter order changed** — previously `(a, b, c)`, now `(a, c, b)`. Update all call sites. (#NNN)
+
+### Added
+
+- Short description of new feature — link to docs if the feature is non-obvious. (#NNN)
+
+### Changed
+
+- Short description of what changed and why. (#NNN)
+
+### Deprecated
+
+- `old_function_name` is deprecated in favour of `new_function_name`. Will be removed in vX+1.0.0.
+
+### Removed
+
+- `removed_function_name` — was deprecated since vX.Y.0. (#NNN)
+
+### Fixed
+
+- Short description of the bug and what was incorrect. (#NNN)
+
+### Security
+
+- Short description of the vulnerability class and impact, without details that could be
+  weaponised against unpatched deployments. Full advisory: GHSA-xxxx-xxxx-xxxx. (#NNN)
+
+---
+
+### Migration Notes (if applicable)
+
+Step-by-step instructions for users upgrading from the previous version.
+Include contract redeployment steps, storage migration commands, and frontend update steps.
+
+### Upgrade Checklist
+
+- [ ] Run `make check` against the new version
+- [ ] Deploy new contract to testnet and verify with `is_initialized`
+- [ ] Update `VITE_CONTRACT_ID` in frontend `.env`
+- [ ] Run smoke tests: `make smoke-test-local`
+- [ ] Tag the release: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
+```
+
+---
+
 ## [Unreleased]
 
 ### Added
@@ -77,6 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## [0.1.0] - 2026-05-31
+
+> Initial production release — timestamp-based vault with admin controls and full CI.
 
 ### Added
 

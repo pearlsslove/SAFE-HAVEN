@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+ml-dsa = { version = "0.1.1", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

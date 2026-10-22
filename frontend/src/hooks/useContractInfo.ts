@@ -3,7 +3,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState, useRef } from 'react'
-import { getAdmin, isPaused, getConstants, getDepositorCount, getFeeRecipient, getPendingAdmin } from '../lib/stellar'
+import { getAdmin, isPaused, getConstants, getStorageVersion, getDepositorCount, getFeeRecipient, getPendingAdmin } from '../lib/stellar'
 
 interface ContractInfo {
   admin: string | null
@@ -11,6 +11,7 @@ interface ContractInfo {
   paused: boolean
   maxDeposit: bigint
   maxLockSecs: number
+  version: number | null
   depositorCount: number
   feeRecipient: string | null
   loading: boolean
@@ -23,6 +24,7 @@ export function useContractInfo(): ContractInfo {
   const [paused,         setPaused]         = useState(false)
   const [maxDeposit,     setMaxDeposit]     = useState<bigint>(1_000_000_000_000_000n)
   const [maxLockSecs,    setMaxLockSecs]    = useState(157_788_000)
+  const [version,        setVersion]        = useState<number | null>(null)
   const [depositorCount, setDepositorCount] = useState(0)
   const [feeRecipient,   setFeeRecipient]   = useState<string | null>(null)
   const [loading,        setLoading]        = useState(true)
@@ -31,17 +33,19 @@ export function useContractInfo(): ContractInfo {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [adminVal, pendingAdminVal, pausedVal, constants, count, fee] = await Promise.all([
+      const [adminVal, pendingAdminVal, pausedVal, constants, storageVersion, count, fee] = await Promise.all([
         getAdmin(),
         getPendingAdmin(),
         isPaused(),
         getConstants(),
+        getStorageVersion(),
         getDepositorCount(),
         getFeeRecipient(),
       ])
       setAdmin(adminVal)
       setPendingAdmin(pendingAdminVal)
       setPaused(pausedVal)
+      setVersion(storageVersion)
       if (constants) {
         setMaxDeposit(constants.maxDeposit)
         setMaxLockSecs(constants.maxLockSecs)
@@ -68,6 +72,6 @@ export function useContractInfo(): ContractInfo {
   }, [refresh])
 
   return {
-    admin, pendingAdmin, paused, maxDeposit, maxLockSecs, depositorCount, feeRecipient, loading, refresh,
+    admin, pendingAdmin, paused, maxDeposit, maxLockSecs, version, depositorCount, feeRecipient, loading, refresh,
   }
 }

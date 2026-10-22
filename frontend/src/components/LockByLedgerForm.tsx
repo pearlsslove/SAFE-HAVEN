@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
 import { TxStatusBadge } from './TxStatusBadge'
+import { SubmitTimeoutBanner } from './SubmitTimeoutBanner'
+import { useSubmitTimeout, TimeoutError } from '../hooks/useSubmitTimeout'
 import { buildDepositByLedger, submitTx, getTokenDecimals, getTokenMetadata, getLedgerSequence } from '../lib/stellar'
 import { 
   baseUnitsToAmount, 
@@ -35,6 +37,19 @@ export function LockByLedgerForm({ contractInfo, onSuccess }: LockByLedgerFormPr
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
   const [txHash, setTxHash] = useState<string | undefined>()
   const [txError, setTxError] = useState<string | undefined>()
+
+  // Whether the last submission attempt timed out (drives the banner retry UI).
+  const [timedOut, setTimedOut] = useState(false)
+
+  // Submission timeout — 2-minute countdown with 30-second warning.
+  const submitTimeout = useSubmitTimeout({
+    onTimeout: (elapsedMs) => {
+      console.warn(`[LockByLedgerForm] Submission timed out after ${elapsedMs}ms`)
+    },
+    onWarning: () => {
+      toast('Submission is taking longer than expected…', { icon: '⚠️', duration: 4000 })
+    },
+  })
 
   // Token decimals state — defaults to 7 (XLM) but updates when token changes
   const [tokenDecimals, setTokenDecimals] = useState<number>(7)
@@ -148,6 +163,10 @@ export function LockByLedgerForm({ contractInfo, onSuccess }: LockByLedgerFormPr
     setTxStatus('signing')
     setTxError(undefined)
     setTxHash(undefined)
+    setTimedOut(false)
+
+    // Start the 2-minute countdown.
+    const timeoutRace = submitTimeout.start()
 
     try {
       const amountBaseUnits = amountToBaseUnits(amount, tokenDecimals)
@@ -166,7 +185,19 @@ export function LockByLedgerForm({ contractInfo, onSuccess }: LockByLedgerFormPr
       if (sigResult.signed) {
         // Success: proceed with submission
         setTxStatus('submitting')
-        const result = await submitTx(sigResult.xdr)
+
+        // Race the submission against the timeout.
+        const result = await Promise.race([submitTx(sigResult.xdr), timeoutRace.then(() => null)])
+
+        if (result === null) {
+          // Safety net — TimeoutError is normally thrown, but handle null too.
+          setTxStatus('error')
+          setTimedOut(true)
+          setTxError('Submission timed out. Please try again.')
+          return
+        }
+
+        submitTimeout.cancel()
 
         if (result.success) {
           setTxStatus('success')
@@ -183,21 +214,38 @@ export function LockByLedgerForm({ contractInfo, onSuccess }: LockByLedgerFormPr
         }
       } else if (sigResult.rejected) {
         // User rejected: silently reset state
+        submitTimeout.cancel()
         setTxStatus('idle')
         return
       } else {
         // Signing error: already toasted, but still reset state
+        submitTimeout.cancel()
         setTxStatus('idle')
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Unexpected error'
-      setTxStatus('error')
-      setTxError(msg)
-      toast.error(msg)
+      submitTimeout.cancel()
+      if (e instanceof TimeoutError) {
+        setTxStatus('error')
+        setTimedOut(true)
+        setTxError('Submission timed out. Please try again.')
+        toast.error('Deposit submission timed out. Your wallet wasn\'t charged — please try again.')
+      } else {
+        const msg = e instanceof Error ? e.message : 'Unexpected error'
+        setTxStatus('error')
+        setTxError(msg)
+        toast.error(msg)
+      }
     }
   }
 
   const isPending = txStatus === 'signing' || txStatus === 'submitting' || txStatus === 'confirming'
+
+  // Retry the last submission with the same form data (no re-entry needed).
+  function handleTimeoutRetry() {
+    setTimedOut(false)
+    setTxStatus('idle')
+    setTxError(undefined)
+  }
 
   if (!wallet && !isRestoringSession) {
     return (
@@ -375,6 +423,14 @@ export function LockByLedgerForm({ contractInfo, onSuccess }: LockByLedgerFormPr
           )}
 
           <TxStatusBadge status={txStatus} txHash={txHash} error={txError} />
+
+          <SubmitTimeoutBanner
+            secondsRemaining={submitTimeout.secondsRemaining}
+            isWarning={submitTimeout.isWarning}
+            timedOut={timedOut}
+            onRetry={handleTimeoutRetry}
+            onDismiss={() => setTimedOut(false)}
+          />
 
           <button type="submit" className="btn-primary w-full" disabled={!isValid || isPending}>
             {isPending ? (

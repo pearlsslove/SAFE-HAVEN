@@ -44,6 +44,28 @@ export const CONFIG = {
 
   /** Stroops per XLM */
   STROOPS_PER_XLM: 10_000_000,
+
+  // ============================================================
+  //  Fiat On-Ramp Configuration (Ramp Network)
+  // ============================================================
+
+  /** Ramp Network API key for embedded widget */
+  RAMP_API_KEY: (import.meta.env.VITE_RAMP_API_KEY as string) ?? '',
+
+  /** Ramp environment: "production" or "staging" (default: staging for testing) */
+  RAMP_ENVIRONMENT: (import.meta.env.VITE_RAMP_ENVIRONMENT as 'production' | 'staging') ?? 'staging',
+
+  /** Whether Ramp on-ramp is enabled (requires API key) */
+  RAMP_ENABLED: !!(import.meta.env.VITE_RAMP_API_KEY as string),
+
+  // ============================================================
+  //  Version Pinning (#399)
+  // ============================================================
+
+  /** Expected contract version this frontend is pinned to (semver string) */
+  EXPECTED_CONTRACT_VERSION: (import.meta.env.VITE_EXPECTED_CONTRACT_VERSION as string) ?? '0.1.0',
+  /** Expected contract storage schema version */
+  EXPECTED_STORAGE_VERSION: Number(import.meta.env.VITE_EXPECTED_STORAGE_VERSION ?? 1),
 } as const
 
 // ============================================================
@@ -139,6 +161,18 @@ export function validateConfig(): ConfigError[] {
       field: 'NATIVE_TOKEN',
       message: `Invalid native token address: "${CONFIG.NATIVE_TOKEN}"`,
       fix: 'Native token address must be a valid Stellar contract address (starts with C, 56 characters)'
+    })
+  }
+
+  // Validate EXPECTED_CONTRACT_VERSION: if set, must be a valid semver string (#399)
+  if (
+    CONFIG.EXPECTED_CONTRACT_VERSION &&
+    !/^\d+\.\d+\.\d+$/.test(CONFIG.EXPECTED_CONTRACT_VERSION)
+  ) {
+    errors.push({
+      field: 'VITE_EXPECTED_CONTRACT_VERSION',
+      message: `Invalid semver format: "${CONFIG.EXPECTED_CONTRACT_VERSION}"`,
+      fix: 'VITE_EXPECTED_CONTRACT_VERSION must follow the semver format MAJOR.MINOR.PATCH (e.g. "0.1.0")'
     })
   }
 

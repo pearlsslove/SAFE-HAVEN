@@ -59,6 +59,10 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
   const [renounceTxHash,      setRenounceTxHash]      = useState<string | undefined>()
   const [renounceTxError,     setRenounceTxError]     = useState<string | undefined>()
 
+  // 2FA states
+  const [show2FA, setShow2FA] = useState(false)
+  const [pendingAction, setPendingAction] = useState<'pause' | 'unpause' | 'emergency' | null>(null)
+
   const isAdmin = wallet?.address === contractInfo.admin
   const pausePending = pauseTxStatus === 'signing' || pauseTxStatus === 'submitting' || pauseTxStatus === 'confirming'
   const emrgPending  = emrgTxStatus  === 'signing' || emrgTxStatus  === 'submitting' || emrgTxStatus  === 'confirming'
@@ -136,6 +140,20 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
   async function handleEmergencyWithdraw(e: React.FormEvent) {
     e.preventDefault()
     if (!wallet || !emrgDepositor || !emrgDepositId || !emrgDepositorIsValid) return
+
+    // Check if 2FA is required
+    if (twoFAState.enabled) {
+      setPendingAction('emergency')
+      setShow2FA(true)
+      return
+    }
+
+    // Proceed without 2FA
+    await executeEmergencyWithdraw()
+  }
+
+  async function executeEmergencyWithdraw() {
+    if (!wallet || !emrgDepositor || !emrgDepositId) return
 
     setEmrgTxStatus('signing')
     setEmrgTxError(undefined)
@@ -414,17 +432,17 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
   }
 
   return (
-    <div className="max-w-lg space-y-5">
+    <div className="max-w-lg mx-auto space-y-4 md:space-y-5">
       {/* Contract status card */}
-      <div className="card p-6">
-        <h2 className="font-semibold text-lg mb-4">Contract Status</h2>
-        <div className="grid grid-cols-2 gap-y-3 text-sm mb-5">
+      <div className="card p-4 md:p-6">
+        <h2 className="font-semibold text-base md:text-lg mb-3 md:mb-4">Contract Status</h2>
+        <div className="grid grid-cols-2 gap-y-2 md:gap-y-3 text-xs md:text-sm mb-4">
           <span className="text-slate-400">Admin</span>
           <a
             href={explorerAddrUrl(contractInfo.admin!)}
             target="_blank"
             rel="noopener noreferrer"
-            className="font-mono text-stellar-400 hover:text-stellar-300 truncate"
+            className="font-mono text-stellar-400 hover:text-stellar-300 truncate text-xs"
           >
             {shortAddr(contractInfo.admin!)}
           </a>
@@ -432,22 +450,22 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
           <span className="text-slate-400">Status</span>
           <span>
             {contractInfo.paused
-              ? <span className="badge-red">Paused</span>
-              : <span className="badge-green">Active</span>
+              ? <span className="badge-red text-xs">Paused</span>
+              : <span className="badge-green text-xs">Active</span>
             }
           </span>
 
           <span className="text-slate-400">Depositors</span>
-          <span className="text-slate-200">{contractInfo.depositorCount}</span>
+          <span className="text-slate-200 text-xs md:text-sm">{contractInfo.depositorCount}</span>
 
           {contractInfo.feeRecipient && (
             <>
-              <span className="text-slate-400">Fee recipient</span>
+              <span className="text-slate-400 text-xs md:text-sm">Fee recipient</span>
               <a
                 href={explorerAddrUrl(contractInfo.feeRecipient)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-mono text-stellar-400 hover:text-stellar-300 truncate"
+                className="font-mono text-stellar-400 hover:text-stellar-300 truncate text-xs"
               >
                 {shortAddr(contractInfo.feeRecipient)}
               </a>
@@ -456,12 +474,12 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
 
           {contractInfo.pendingAdmin && (
             <>
-              <span className="text-slate-400">Pending admin</span>
+              <span className="text-slate-400 text-xs md:text-sm">Pending admin</span>
               <a
                 href={explorerAddrUrl(contractInfo.pendingAdmin)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-mono text-blue-400 hover:text-blue-300 truncate"
+                className="font-mono text-blue-400 hover:text-blue-300 truncate text-xs"
               >
                 {shortAddr(contractInfo.pendingAdmin)}
               </a>
@@ -470,15 +488,15 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
         </div>
 
         {contractInfo.pendingAdmin && (
-          <div className="mt-4 mb-4">
+          <div className="mt-3 md:mt-4 mb-3 md:mb-4">
             <button
               onClick={handleCancelTransfer}
-              className="btn-secondary w-full text-sm"
+              className="btn-secondary w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto"
               disabled={cancelPending}
             >
               {cancelPending
                 ? <span className="w-4 h-4 border-2 border-current/30 border-t-current rounded-full animate-spin" />
-                : 'Cancel pending transfer'
+                : 'Cancel transfer'
               }
             </button>
           </div>
@@ -486,28 +504,28 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
 
         <TxStatusBadge status={pauseTxStatus} txHash={pauseTxHash} error={pauseTxError} />
 
-        <div className="mt-4">
+        <div className="mt-3 md:mt-4">
           <button
-            className={contractInfo.paused ? 'btn-primary w-full' : 'btn-danger w-full'}
+            className={`w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto ${contractInfo.paused ? 'btn-primary' : 'btn-danger'}`}
             onClick={handleTogglePause}
             disabled={pausePending}
           >
             {pausePending
               ? <span className="w-4 h-4 border-2 border-current/30 border-t-current rounded-full animate-spin" />
-              : contractInfo.paused ? 'Unpause contract' : 'Pause contract'
+              : contractInfo.paused ? 'Unpause' : 'Pause'
             }
           </button>
         </div>
       </div>
 
       {/* Emergency withdrawal */}
-      <div className="card p-6">
-        <h2 className="font-semibold text-lg mb-1">Emergency Withdrawal</h2>
-        <p className="text-sm text-slate-400 mb-5">
-          Returns locked tokens directly to the depositor, bypassing the time lock. Funds always go to the depositor — never to admin.
+      <div className="card p-4 md:p-6">
+        <h2 className="font-semibold text-base md:text-lg mb-1">Emergency Withdrawal</h2>
+        <p className="text-xs md:text-sm text-slate-400 mb-4">
+          Returns funds to depositor, bypassing time lock.
         </p>
 
-        <form onSubmit={handleEmergencyWithdraw} className="space-y-4">
+        <form onSubmit={handleEmergencyWithdraw} className="space-y-3 md:space-y-4">
           <div>
             <label className="label">Depositor address</label>
             <input
@@ -540,7 +558,7 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
 
           <button
             type="submit"
-            className="btn-danger w-full"
+            className="btn-danger w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto"
             disabled={!emrgDepositor || !emrgDepositId || !emrgDepositorIsValid || emrgPending}
           >
             {emrgPending
@@ -552,21 +570,21 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
       </div>
 
       {/* Transfer admin */}
-      <div className="card p-6">
-        <h2 className="font-semibold text-lg mb-1">Transfer Admin</h2>
-        <p className="text-sm text-slate-400 mb-5">
-          Initiate a two-step admin transfer. The new admin must accept the transfer to complete ownership change.
+      <div className="card p-4 md:p-6">
+        <h2 className="font-semibold text-base md:text-lg mb-1">Transfer Admin</h2>
+        <p className="text-xs md:text-sm text-slate-400 mb-4">
+          Two-step transfer. New admin must accept to complete.
         </p>
 
         {contractInfo.pendingAdmin ? (
-          <div className="space-y-4">
-            <div className="rounded-lg bg-blue-900/20 border border-blue-700/40 p-4">
-              <p className="text-sm text-blue-300 mb-2">Pending admin transfer</p>
+          <div className="space-y-3 md:space-y-4">
+            <div className="rounded-lg bg-blue-900/20 border border-blue-700/40 p-3">
+              <p className="text-xs text-blue-300 mb-2">Pending admin</p>
               <a
                 href={explorerAddrUrl(contractInfo.pendingAdmin)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-mono text-stellar-400 hover:text-stellar-300 break-all"
+                className="font-mono text-stellar-400 hover:text-stellar-300 break-all text-xs"
               >
                 {contractInfo.pendingAdmin}
               </a>
@@ -576,19 +594,19 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
 
             <button
               onClick={handleCancelTransfer}
-              className="btn-secondary w-full"
+              className="btn-secondary w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto"
               disabled={cancelPending}
             >
               {cancelPending
                 ? <span className="w-4 h-4 border-2 border-current/30 border-t-current rounded-full animate-spin" />
-                : 'Cancel pending transfer'
+                : 'Cancel'
               }
             </button>
           </div>
         ) : (
-          <form onSubmit={handleTransferAdmin} className="space-y-4">
+          <form onSubmit={handleTransferAdmin} className="space-y-3 md:space-y-4">
             <div>
-              <label className="label">New admin address</label>
+              <label className="label">New admin</label>
               <input
                 className="input"
                 type="text"
@@ -603,7 +621,7 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
 
             <button
               type="submit"
-              className="btn-primary w-full"
+              className="btn-primary w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto"
               disabled={!transferNewAdmin || transferPending}
             >
               {transferPending
@@ -615,16 +633,16 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
         )}
 
         {contractInfo.pendingAdmin && wallet?.address === contractInfo.pendingAdmin && (
-          <div className="mt-6 border-t border-slate-700/40 pt-6">
-            <p className="text-sm text-slate-400 mb-4">
-              You are the pending admin. Accept the transfer to complete it.
+          <div className="mt-4 md:mt-6 border-t border-slate-700/40 pt-4 md:pt-6">
+            <p className="text-xs md:text-sm text-slate-400 mb-3 md:mb-4">
+              You are the pending admin. Accept to complete.
             </p>
 
             <TxStatusBadge status={acceptTxStatus} txHash={acceptTxHash} error={acceptTxError} />
 
             <button
               onClick={handleAcceptAdmin}
-              className="btn-primary w-full"
+              className="btn-primary w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto mt-3"
               disabled={acceptPending}
             >
               {acceptPending
@@ -637,21 +655,21 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
       </div>
 
       {/* Renounce admin */}
-      <div className="card p-6">
-        <div className="rounded-lg bg-red-900/20 border border-red-700/40 p-4 mb-5">
-          <div className="flex items-center gap-3">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5 text-red-400 flex-shrink-0">
+      <div className="card p-4 md:p-6">
+        <div className="rounded-lg bg-red-900/20 border border-red-700/40 p-3 mb-4">
+          <div className="flex items-center gap-2 md:gap-3">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4 md:w-5 md:h-5 text-red-400 flex-shrink-0">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
             </svg>
-            <div>
-              <p className="font-semibold text-red-400">Renounce Admin</p>
-              <p className="text-xs text-red-300 mt-1">This action is permanent and cannot be undone.</p>
+            <div className="min-w-0">
+              <p className="font-semibold text-red-400 text-sm md:text-base">Renounce Admin</p>
+              <p className="text-xs text-red-300 mt-0.5">Permanent. Cannot undo.</p>
             </div>
           </div>
         </div>
 
-        <p className="text-sm text-slate-400 mb-5">
-          Permanently remove admin rights and make the contract fully trustless. Once renounced, no one can pause deposits, perform emergency withdrawals, or change the contract configuration.
+        <p className="text-xs md:text-sm text-slate-400 mb-4">
+          Make contract fully trustless. No one can pause, emergency withdraw, or change config.
         </p>
 
         <form
@@ -661,10 +679,10 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
               handleRenounceAdmin()
             }
           }}
-          className="space-y-4"
+          className="space-y-3 md:space-y-4"
         >
           <div>
-            <label className="label">Type "RENOUNCE" to confirm</label>
+            <label className="label">Type "RENOUNCE"</label>
             <input
               className="input"
               type="text"
@@ -673,16 +691,13 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
               placeholder="RENOUNCE"
               disabled={renouncePending}
             />
-            <p className="text-xs text-slate-500 mt-2">
-              This confirms you understand the irreversible nature of this action.
-            </p>
           </div>
 
           <TxStatusBadge status={renounceTxStatus} txHash={renounceTxHash} error={renounceTxError} />
 
           <button
             type="submit"
-            className="btn-danger w-full"
+            className="btn-danger w-full text-xs md:text-sm py-2.5 min-h-10 md:min-h-auto"
             disabled={renounceConfirmText !== 'RENOUNCE' || renouncePending}
           >
             {renouncePending
